@@ -1,0 +1,4 @@
+train: /kaggle/working/synthdata/images/train
+val: /kaggle/working/synthdata/images/val
+nc: 3
+names: ['Normal','Reversal','Corrected']
