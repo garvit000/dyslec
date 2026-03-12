@@ -1,0 +1,7 @@
+*.pyc
+*.csv
+model/datasets/eye-tracking/data/
+*.png
+*.jpg
+*.txt
+*.m4v
