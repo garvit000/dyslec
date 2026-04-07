@@ -57,13 +57,28 @@ def run_inference(sample_data, scaler, model, top_fea):
     # Class probabilities usually come out as [prob_class_0, prob_class_1] because of final dense layer with 2 units & sigmoid
     return prediction[0]
 
+class CustomDense(tf.keras.layers.Dense):
+    def __init__(self, *args, **kwargs):
+        kwargs.pop("quantization_config", None)
+        super().__init__(*args, **kwargs)
+
+class CustomBatchNormalization(tf.keras.layers.BatchNormalization):
+    def __init__(self, *args, **kwargs):
+        kwargs.pop("renorm", None)
+        kwargs.pop("renorm_clipping", None)
+        kwargs.pop("renorm_momentum", None)
+        super().__init__(*args, **kwargs)
+
 def main():
     if not os.path.exists(MODEL_PATH):
         print(f"Model not found at {MODEL_PATH}! Please train the model first.")
         return
 
     print(f"Loading EEG Keras Model from {MODEL_PATH}...")
-    model = tf.keras.models.load_model(MODEL_PATH)
+    model = tf.keras.models.load_model(MODEL_PATH, custom_objects={
+        'Dense': CustomDense,
+        'BatchNormalization': CustomBatchNormalization
+    })
     
     print("Preparing feature scaler...")
     scaler, df, top_fea = prepare_scaler()
