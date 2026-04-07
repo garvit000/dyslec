@@ -7,3 +7,5 @@ model/datasets/eye-tracking/data/
 *.m4v
 model/datasets/eye-tracking/rois/__MACOSX/
 model/datasets/eye-tracking/stimuli/__MACOSX/
+# Don't ignore requirements file
+!requirements.txt
