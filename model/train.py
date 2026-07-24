@@ -4,16 +4,24 @@
 # Local training script (no Kaggle / Jupyter dependencies)
 
 import os
+import json
+import sys
+
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')          # non-interactive backend — saves plots to disk
 import matplotlib.pyplot as plt
-import seaborn as sns
+import joblib
 
 from sklearn.feature_selection import mutual_info_classif
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
+
+# Windows consoles default to cp1252, which cannot encode the arrows/checkmarks
+# used below; fall back to replacing them rather than crashing mid-run.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 import tensorflow as tf
 from tensorflow import keras
@@ -24,8 +32,18 @@ BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 EEG_CSV     = os.path.join(BASE_DIR, 'datasets', 'eeg', 'EEG_data.csv')
 DEMO_CSV    = os.path.join(BASE_DIR, 'datasets', 'eeg', 'demographic_info.csv')
 MODEL_PATH  = os.path.join(BASE_DIR, 'dyslexia_model.h5')
+SCALER_PATH = os.path.join(BASE_DIR, 'scaler.joblib')
+FEATURES_PATH = os.path.join(BASE_DIR, 'features.json')
 PLOTS_DIR   = os.path.join(BASE_DIR, 'plots')
 os.makedirs(PLOTS_DIR, exist_ok=True)
+
+for path, name in ((EEG_CSV, 'EEG_data.csv'), (DEMO_CSV, 'demographic_info.csv')):
+    if not os.path.exists(path):
+        raise SystemExit(
+            f"Missing dataset file: {path}\n"
+            f"Download {name} from https://www.kaggle.com/datasets/wanghaohan/confused-eeg "
+            f"and extract it to model/datasets/eeg/."
+        )
 
 # ── 1. Load Data ──────────────────────────────────────────────────────────────
 print("Loading datasets...")
@@ -44,9 +62,10 @@ data = data.rename(columns={
 df = df.merge(data, how='inner', on='SubjectID')
 print(f"  Merged shape  : {df.shape}")
 
-# Encode categorical columns
-df['gender']    = df['gender'].replace({'M': 1, 'F': 0})
-df['ethnicity'] = df['ethnicity'].replace({'Han Chinese': 0, 'Bengali': 1, 'English': 2})
+# Encode categorical columns. .map() (rather than .replace()) turns any
+# unexpected category into NaN so it shows up in the null check below.
+df['gender']    = df['gender'].map({'M': 1, 'F': 0})
+df['ethnicity'] = df['ethnicity'].map({'Han Chinese': 0, 'Bengali': 1, 'English': 2})
 
 # Check for nulls
 null_cols = [col for col in df.columns if df[col].isnull().sum() > 0]
@@ -66,13 +85,22 @@ print(mi_score.head(14))
 top_fea = ['VideoID', 'Attention', 'Alpha2', 'Delta', 'Gamma1', 'Theta', 'Beta1',
            'Alpha1', 'Mediation', 'Gamma2', 'SubjectID', 'Beta2', 'Raw', 'age']
 
-# ── 4. Scale Features ─────────────────────────────────────────────────────────
-df_sc = StandardScaler().fit_transform(df[top_fea])
-
-# ── 5. Train / Val / Test Split ───────────────────────────────────────────────
-Xtr, xte, Ytr, yte   = train_test_split(df_sc, y, random_state=108, test_size=0.27)
-xtr, xval, ytr, yval = train_test_split(Xtr,   Ytr, random_state=108, test_size=0.27)
+# ── 4. Train / Val / Test Split ───────────────────────────────────────────────
+X = df[top_fea]
+Xtr, xte, Ytr, yte   = train_test_split(X,   y,   random_state=108, test_size=0.27)
+xtr, xval, ytr, yval = train_test_split(Xtr, Ytr, random_state=108, test_size=0.27)
 print(f"\nSplit sizes  →  train: {len(xtr)}  val: {len(xval)}  test: {len(xte)}")
+
+# ── 5. Scale Features ─────────────────────────────────────────────────────────
+# Fit on the training split only, then apply to val/test. Fitting on the full
+# dataset would leak val/test statistics into training.
+scaler = StandardScaler().fit(xtr)
+xtr, xval, xte = (scaler.transform(part) for part in (xtr, xval, xte))
+
+joblib.dump(scaler, SCALER_PATH)
+with open(FEATURES_PATH, 'w', encoding='utf-8') as fh:
+    json.dump(top_fea, fh, indent=2)
+print(f"Scaler saved  → {SCALER_PATH}")
 
 # ── 6. Build Model ────────────────────────────────────────────────────────────
 print("\nBuilding model...")
@@ -123,20 +151,19 @@ print(f"\nModel saved → {MODEL_PATH}")
 # ── 10. Plot Training History ─────────────────────────────────────────────────
 training = pd.DataFrame(history.history)
 
-plt.figure(figsize=(10, 4))
-training[['loss', 'val_loss']].plot()
-plt.title('Loss'); plt.xlabel('Epoch'); plt.ylabel('Loss')
-plt.tight_layout()
-loss_plot = os.path.join(PLOTS_DIR, 'loss.png')
-plt.savefig(loss_plot)
-print(f"Loss plot     → {loss_plot}")
-
-plt.figure(figsize=(10, 4))
-training[['accuracy', 'val_accuracy']].plot()
-plt.title('Accuracy'); plt.xlabel('Epoch'); plt.ylabel('Accuracy')
-plt.tight_layout()
-acc_plot = os.path.join(PLOTS_DIR, 'accuracy.png')
-plt.savefig(acc_plot)
-print(f"Accuracy plot → {acc_plot}")
+# pandas' .plot() creates its own figure, so draw onto an explicit axis —
+# calling plt.figure() first would leave the styled figure blank.
+for cols, title, ylabel, fname in (
+    (['loss', 'val_loss'],         'Loss',     'Loss',     'loss.png'),
+    (['accuracy', 'val_accuracy'], 'Accuracy', 'Accuracy', 'accuracy.png'),
+):
+    fig, ax = plt.subplots(figsize=(10, 4))
+    training[cols].plot(ax=ax)
+    ax.set_title(title); ax.set_xlabel('Epoch'); ax.set_ylabel(ylabel)
+    fig.tight_layout()
+    out_path = os.path.join(PLOTS_DIR, fname)
+    fig.savefig(out_path)
+    plt.close(fig)
+    print(f"{title} plot → {out_path}")
 
 print("\nDone ✓")
